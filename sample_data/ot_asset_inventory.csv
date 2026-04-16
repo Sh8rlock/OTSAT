@@ -1,0 +1,16 @@
+asset_id,asset_name,asset_type,purdue_level,zone,ip_address,protocol,os,firmware_version,vendor,criticality,last_patched,network_segmented,auth_enabled,encrypted_comms,backup_exists,has_antivirus,physical_access_controlled,change_mgmt_documented,incident_response_plan
+OT-001,Main DCS Controller,DCS,Level_2,Process_Control,10.10.2.10,Modbus/TCP,Windows Server 2016,4.2.1,Honeywell,Critical,2025-08-15,Yes,Yes,No,Yes,Yes,Yes,Yes,Yes
+OT-002,Reactor PLC Unit A,PLC,Level_1,Safety,10.10.1.20,EtherNet/IP,Firmware Only,3.1.0,Allen-Bradley,Critical,2024-03-10,Yes,No,No,Yes,No,Yes,Yes,Yes
+OT-003,Tank Level Transmitter,Sensor,Level_0,Field,10.10.0.30,HART,None,2.0.5,Emerson,High,Never,No,No,No,No,No,Yes,No,No
+OT-004,SCADA Server Primary,SCADA,Level_2,Process_Control,10.10.2.40,OPC-UA,Windows Server 2019,6.1.2,Siemens,Critical,2026-01-20,Yes,Yes,Yes,Yes,Yes,Yes,Yes,Yes
+OT-005,HMI Workstation 1,HMI,Level_2,Process_Control,10.10.2.50,OPC-DA,Windows 10 LTSC,N/A,GE Digital,High,2025-11-05,Yes,Yes,No,Yes,Yes,Yes,Yes,Yes
+OT-006,Historian Server,Historian,Level_3,Operations,10.10.3.60,SQL/ODBC,Windows Server 2022,8.0.1,OSIsoft,High,2026-02-28,Yes,Yes,Yes,Yes,Yes,Yes,Yes,Yes
+OT-007,Remote RTU Site B,RTU,Level_1,Field,10.10.1.70,DNP3,Firmware Only,1.4.3,Schweitzer,Critical,2023-06-22,No,No,No,Yes,No,No,No,Yes
+OT-008,Fire & Gas System,SIS,Level_1,Safety,10.10.1.80,ProfiSafe,Firmware Only,5.0.0,Yokogawa,Critical,2025-05-18,Yes,Yes,No,Yes,No,Yes,Yes,Yes
+OT-009,Ethernet Switch ICS,Network,Level_2,Process_Control,10.10.2.90,Managed,Firmware Only,3.3.7,Cisco IE,High,2025-09-30,Yes,Yes,Yes,Yes,No,Yes,Yes,Yes
+OT-010,Engineering Workstation,Workstation,Level_3,Operations,10.10.3.100,RDP/SSH,Windows 11,N/A,Dell,High,2026-03-15,Yes,Yes,Yes,Yes,Yes,Yes,Yes,Yes
+OT-011,Boiler PLC Unit C,PLC,Level_1,Safety,10.10.1.110,Modbus/RTU,Firmware Only,2.8.1,Schneider,Critical,2024-11-01,Yes,No,No,Yes,No,Yes,No,No
+OT-012,Wireless Access Point OT,Network,Level_2,Process_Control,10.10.2.120,WPA2-Enterprise,Firmware Only,4.1.0,Aruba,Medium,2025-07-20,Yes,Yes,Yes,No,No,Yes,Yes,Yes
+OT-013,Badge Reader Entry,Physical,Level_3,Operations,10.10.3.130,Wiegand,Firmware Only,1.2.0,HID Global,Medium,Never,No,No,No,No,No,Yes,No,No
+OT-014,Camera System NVR,Physical,Level_3,Operations,10.10.3.140,ONVIF,Linux,2.5.4,Axis,Medium,2025-04-10,Yes,Yes,No,Yes,No,Yes,Yes,Yes
+OT-015,Portable Maintenance Laptop,Workstation,Level_3,Operations,10.10.3.150,USB/Serial,Windows 10,N/A,Lenovo,High,2026-01-05,No,Yes,No,No,Yes,No,No,Yes

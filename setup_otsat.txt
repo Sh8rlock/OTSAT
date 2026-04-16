@@ -1,0 +1,889 @@
+#!/bin/bash
+# OTSAT Setup Script - Run this in your cloned repo directory
+# Usage: bash setup_otsat.txt
+# This creates all project files for the OTSAT GitHub repo
+
+echo "Setting up OTSAT project files..."
+
+mkdir -p sample_data
+
+# ---- run_assessment.py ----
+cat > run_assessment.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+OTSAT - OT Security Assessment Toolkit
+=======================================
+Automated NIST 800-82 Rev. 3 compliance auditor for ICS/SCADA/DCS/PCN environments.
+Zero-dependency Python toolkit with risk-weighted scoring and professional HTML reporting.
+
+Usage:
+    python run_assessment.py --input sample_data/ot_asset_inventory.csv
+    python run_assessment.py --input assets.csv --output report.html
+    python run_assessment.py --input assets.csv --json-only
+    python run_assessment.py --input assets.csv --html-only --quiet
+
+Author: Larry Odeyemi
+License: MIT
+"""
+
+import argparse
+import sys
+import os
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from compliance_auditor import run_full_audit, get_remediation_roadmap
+from report_generator import generate_html_report, generate_json_report
+
+
+def _print_banner():
+    print(r"""
+  ___  _____ ____    _  _____
+ / _ \|_   _/ ___|  / \|_   _|
+| | | | | | \___ \ / _ \ | |
+| |_| | | |  ___) / ___ \| |
+ \___/  |_| |____/_/   \_\_|
+
+  OT Security Assessment Toolkit
+  NIST 800-82 Rev. 3 Compliance Auditor
+""")
+
+
+def _print_summary(report: dict):
+    comp = report["overall_compliance"]
+    bar_len = 20
+
+    print(f"  Overall Compliance:       {comp}%")
+    print(f"  Total Findings:           {report['total_findings']} "
+          f"({report['critical_findings_count']} Critical, {report['high_findings_count']} High)")
+    print(f"  Aggregate Risk Score:     {report['total_risk_score']}")
+    print(f"  Fully Compliant Assets:   {report['fully_compliant_assets']} of {report['total_assets']}")
+    print()
+
+    print("  CSF Compliance:")
+    for func in ["IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]:
+        pct = report["csf_compliance"][func]["compliance_pct"]
+        filled = int(pct / 100 * bar_len)
+        bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
+        print(f"    {func:<12} {bar} {pct:>5.1f}%")
+    print()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="OTSAT - Automated NIST 800-82 Rev. 3 OT Security Compliance Auditor",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--input", "-i", required=True, help="Path to asset inventory file (CSV or JSON)")
+    parser.add_argument("--output", "-o", default=None, help="Output file path")
+    parser.add_argument("--json-only", action="store_true", help="Generate JSON report only")
+    parser.add_argument("--html-only", action="store_true", help="Generate HTML report only")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress console output")
+
+    args = parser.parse_args()
+
+    if not args.quiet:
+        _print_banner()
+
+    if not os.path.isfile(args.input):
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.quiet:
+        print(f"  Loading inventory: {args.input}")
+
+    start = time.time()
+    report = run_full_audit(args.input)
+    elapsed = time.time() - start
+
+    if not args.quiet:
+        print(f"  Audit completed in {elapsed:.3f}s")
+        print(f"  Assets evaluated: {report['total_assets']}")
+        print()
+        _print_summary(report)
+
+    outputs = []
+
+    if not args.json_only:
+        html_path = args.output if args.output and args.output.endswith(".html") else "otsat_report.html"
+        generate_html_report(report, html_path)
+        outputs.append(html_path)
+        if not args.quiet:
+            print(f"  HTML report saved: {html_path}")
+
+    if not args.html_only:
+        json_path = args.output if args.output and args.output.endswith(".json") else "otsat_report.json"
+        generate_json_report(report, json_path)
+        outputs.append(json_path)
+        if not args.quiet:
+            print(f"  JSON report saved: {json_path}")
+
+    if not args.quiet:
+        print()
+        print("  Assessment complete. Open the HTML report in a browser to view results.")
+        print()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYEOF
+
+# ---- ot_asset_parser.py ----
+cat > ot_asset_parser.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+OT Asset Inventory Parser
+Parses CSV/JSON asset inventories, normalizes data, calculates patch age,
+and generates summaries by Purdue level.
+"""
+
+import csv
+import json
+import os
+from datetime import datetime, date
+
+
+CRITICALITY_WEIGHTS = {
+    "Critical": 4,
+    "High": 3,
+    "Medium": 2,
+    "Low": 1,
+}
+
+PURDUE_LEVELS = {
+    "Level_0": "Physical Process (Sensors/Actuators)",
+    "Level_1": "Basic Control (PLCs/RTUs/SIS)",
+    "Level_2": "Process Control (DCS/SCADA/HMI)",
+    "Level_3": "Operations & Site Business",
+    "Level_4": "Enterprise Network",
+    "Level_5": "External/DMZ",
+}
+
+
+def parse_csv(filepath: str) -> list[dict]:
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"Asset inventory not found: {filepath}")
+    assets = []
+    with open(filepath, newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            asset = _normalize(row)
+            assets.append(asset)
+    return assets
+
+
+def parse_json(filepath: str) -> list[dict]:
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"Asset inventory not found: {filepath}")
+    with open(filepath, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if isinstance(raw, dict):
+        raw = raw.get("assets", [raw])
+    return [_normalize(item) for item in raw]
+
+
+def load_inventory(filepath: str) -> list[dict]:
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == ".json":
+        return parse_json(filepath)
+    return parse_csv(filepath)
+
+
+def _normalize(row: dict) -> dict:
+    def _bool(val):
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("yes", "true", "1")
+
+    last_patched_raw = str(row.get("last_patched", "Never")).strip()
+    patch_age_days = _calc_patch_age(last_patched_raw)
+
+    return {
+        "asset_id": str(row.get("asset_id", "")).strip(),
+        "asset_name": str(row.get("asset_name", "")).strip(),
+        "asset_type": str(row.get("asset_type", "")).strip(),
+        "purdue_level": str(row.get("purdue_level", "")).strip(),
+        "zone": str(row.get("zone", "")).strip(),
+        "ip_address": str(row.get("ip_address", "")).strip(),
+        "protocol": str(row.get("protocol", "")).strip(),
+        "os": str(row.get("os", "None")).strip(),
+        "firmware_version": str(row.get("firmware_version", "N/A")).strip(),
+        "vendor": str(row.get("vendor", "")).strip(),
+        "criticality": str(row.get("criticality", "Medium")).strip(),
+        "criticality_weight": CRITICALITY_WEIGHTS.get(
+            str(row.get("criticality", "Medium")).strip(), 2
+        ),
+        "last_patched": last_patched_raw,
+        "patch_age_days": patch_age_days,
+        "network_segmented": _bool(row.get("network_segmented", False)),
+        "auth_enabled": _bool(row.get("auth_enabled", False)),
+        "encrypted_comms": _bool(row.get("encrypted_comms", False)),
+        "backup_exists": _bool(row.get("backup_exists", False)),
+        "has_antivirus": _bool(row.get("has_antivirus", False)),
+        "physical_access_controlled": _bool(row.get("physical_access_controlled", False)),
+        "change_mgmt_documented": _bool(row.get("change_mgmt_documented", False)),
+        "incident_response_plan": _bool(row.get("incident_response_plan", False)),
+    }
+
+
+def _calc_patch_age(last_patched: str) -> int | None:
+    if last_patched.lower() in ("never", "", "n/a", "none"):
+        return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%b-%Y"):
+        try:
+            patch_date = datetime.strptime(last_patched, fmt).date()
+            return (date.today() - patch_date).days
+        except ValueError:
+            continue
+    return None
+
+
+def summarize_by_purdue_level(assets: list[dict]) -> dict:
+    summary = {}
+    for asset in assets:
+        level = asset["purdue_level"]
+        if level not in summary:
+            summary[level] = {
+                "description": PURDUE_LEVELS.get(level, "Unknown"),
+                "count": 0,
+                "criticality_breakdown": {},
+                "assets": [],
+            }
+        summary[level]["count"] += 1
+        crit = asset["criticality"]
+        summary[level]["criticality_breakdown"][crit] = (
+            summary[level]["criticality_breakdown"].get(crit, 0) + 1
+        )
+        summary[level]["assets"].append(asset["asset_id"])
+    return summary
+
+
+def get_inventory_stats(assets: list[dict]) -> dict:
+    total = len(assets)
+    never_patched = sum(1 for a in assets if a["patch_age_days"] is None)
+    no_auth = sum(1 for a in assets if not a["auth_enabled"])
+    no_encryption = sum(1 for a in assets if not a["encrypted_comms"])
+    no_segmentation = sum(1 for a in assets if not a["network_segmented"])
+    no_backup = sum(1 for a in assets if not a["backup_exists"])
+    critical_assets = sum(1 for a in assets if a["criticality"] == "Critical")
+
+    return {
+        "total_assets": total,
+        "critical_assets": critical_assets,
+        "never_patched": never_patched,
+        "no_auth": no_auth,
+        "no_encryption": no_encryption,
+        "no_segmentation": no_segmentation,
+        "no_backup": no_backup,
+        "unique_vendors": len({a["vendor"] for a in assets}),
+        "unique_protocols": len({a["protocol"] for a in assets}),
+    }
+PYEOF
+
+# ---- nist_controls.py ----
+cat > nist_controls.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+NIST 800-82 Rev. 3 Control Mapping Engine
+Maps security controls to OT assets based on Purdue level, asset type,
+and criticality. Each control maps to a NIST CSF function.
+"""
+
+CONTROLS = [
+    {
+        "control_id": "AC-3",
+        "title": "Access Enforcement",
+        "csf_function": "PROTECT",
+        "description": "Enforce approved authorizations for logical access to ICS components.",
+        "severity": "Critical",
+        "severity_weight": 4,
+        "check_field": "auth_enabled",
+        "expected": True,
+        "applicable_levels": ["Level_0", "Level_1", "Level_2", "Level_3"],
+        "remediation": "Implement role-based access control (RBAC) on all ICS components. "
+                        "For legacy PLCs/RTUs that lack native authentication, deploy a jump host "
+                        "or bastion with MFA as a compensating control.",
+    },
+    {
+        "control_id": "SC-8",
+        "title": "Transmission Confidentiality and Integrity",
+        "csf_function": "PROTECT",
+        "description": "Protect the confidentiality and integrity of transmitted ICS data.",
+        "severity": "High",
+        "severity_weight": 3,
+        "check_field": "encrypted_comms",
+        "expected": True,
+        "applicable_levels": ["Level_1", "Level_2", "Level_3"],
+        "remediation": "Enable TLS/SSL on OPC-UA and historian connections. For legacy protocols "
+                        "(Modbus, DNP3) that cannot support encryption natively, deploy an encrypted "
+                        "tunnel or VPN between endpoints.",
+    },
+    {
+        "control_id": "SC-7",
+        "title": "Boundary Protection (Network Segmentation)",
+        "csf_function": "PROTECT",
+        "description": "Segment ICS networks at Purdue level boundaries using firewalls or DMZs.",
+        "severity": "Critical",
+        "severity_weight": 4,
+        "check_field": "network_segmented",
+        "expected": True,
+        "applicable_levels": ["Level_0", "Level_1", "Level_2", "Level_3"],
+        "remediation": "Deploy industrial firewalls or unidirectional security gateways between "
+                        "Purdue levels. Ensure Level 0/1 field devices are isolated from Level 3 "
+                        "operations traffic. Validate with network traffic analysis.",
+    },
+    {
+        "control_id": "SI-2",
+        "title": "Flaw Remediation (Patch Management)",
+        "csf_function": "IDENTIFY",
+        "description": "Identify, report, and correct ICS software and firmware flaws in a timely manner.",
+        "severity": "Critical",
+        "severity_weight": 4,
+        "check_field": "patch_age_days",
+        "expected": "within_365",
+        "applicable_levels": ["Level_0", "Level_1", "Level_2", "Level_3"],
+        "remediation": "Establish a patch management program with vendor-validated patches tested "
+                        "in a staging environment before deployment. For assets that cannot be patched, "
+                        "document compensating controls (network isolation, application whitelisting).",
+    },
+    {
+        "control_id": "CP-9",
+        "title": "System Backup",
+        "csf_function": "RECOVER",
+        "description": "Conduct backups of ICS configurations, firmware, and logic programs.",
+        "severity": "High",
+        "severity_weight": 3,
+        "check_field": "backup_exists",
+        "expected": True,
+        "applicable_levels": ["Level_1", "Level_2", "Level_3"],
+        "remediation": "Implement automated backup of PLC/RTU logic, DCS configurations, and "
+                        "historian databases. Store backups offline in a secure location. "
+                        "Test restoration procedures quarterly.",
+    },
+    {
+        "control_id": "SI-3",
+        "title": "Malicious Code Protection",
+        "csf_function": "DETECT",
+        "description": "Implement malicious code protection mechanisms on ICS workstations and servers.",
+        "severity": "High",
+        "severity_weight": 3,
+        "check_field": "has_antivirus",
+        "expected": True,
+        "applicable_levels": ["Level_2", "Level_3"],
+        "remediation": "Deploy application whitelisting (preferred for ICS) or signature-based "
+                        "antivirus on all Windows/Linux endpoints in Levels 2-3. For firmware-only "
+                        "devices, this control is not applicable.",
+    },
+    {
+        "control_id": "PE-3",
+        "title": "Physical Access Control",
+        "csf_function": "PROTECT",
+        "description": "Enforce physical access authorizations at facility entry points and ICS areas.",
+        "severity": "High",
+        "severity_weight": 3,
+        "check_field": "physical_access_controlled",
+        "expected": True,
+        "applicable_levels": ["Level_0", "Level_1", "Level_2", "Level_3"],
+        "remediation": "Install badge readers, cameras, and visitor logs at all ICS access points. "
+                        "Implement a physical security zone model aligned with Purdue levels.",
+    },
+    {
+        "control_id": "CM-3",
+        "title": "Configuration Change Control",
+        "csf_function": "IDENTIFY",
+        "description": "Document, approve, and track changes to ICS configurations and software.",
+        "severity": "High",
+        "severity_weight": 3,
+        "check_field": "change_mgmt_documented",
+        "expected": True,
+        "applicable_levels": ["Level_1", "Level_2", "Level_3"],
+        "remediation": "Implement a Management of Change (MOC) process for all ICS modifications. "
+                        "Require approval from both IT security and process engineering before changes.",
+    },
+    {
+        "control_id": "IR-4",
+        "title": "Incident Handling",
+        "csf_function": "RESPOND",
+        "description": "Implement incident handling capability for ICS security incidents.",
+        "severity": "Critical",
+        "severity_weight": 4,
+        "check_field": "incident_response_plan",
+        "expected": True,
+        "applicable_levels": ["Level_0", "Level_1", "Level_2", "Level_3"],
+        "remediation": "Develop an ICS-specific incident response plan that includes OT-aware "
+                        "procedures, communication protocols with process operators, and safe "
+                        "shutdown procedures. Conduct tabletop exercises annually.",
+    },
+    {
+        "control_id": "RA-5",
+        "title": "Vulnerability Monitoring and Scanning",
+        "csf_function": "IDENTIFY",
+        "description": "Monitor and scan for vulnerabilities in ICS components and networks.",
+        "severity": "High",
+        "severity_weight": 3,
+        "check_field": "patch_age_days",
+        "expected": "within_180",
+        "applicable_levels": ["Level_2", "Level_3"],
+        "remediation": "Conduct passive vulnerability scanning (never active scanning on Level 0/1) "
+                        "using OT-aware tools. Subscribe to ICS-CERT advisories for all deployed "
+                        "vendors. Track vulnerabilities in a risk register.",
+    },
+    {
+        "control_id": "AU-6",
+        "title": "Audit Log Review, Analysis, and Reporting",
+        "csf_function": "DETECT",
+        "description": "Review and analyze ICS audit logs for indications of inappropriate or unusual activity.",
+        "severity": "High",
+        "severity_weight": 3,
+        "check_field": "auth_enabled",
+        "expected": True,
+        "applicable_levels": ["Level_2", "Level_3"],
+        "remediation": "Forward ICS logs to a centralized SIEM or log collector. Establish baseline "
+                        "behavior profiles and alert on deviations. Review critical asset logs daily.",
+    },
+]
+
+
+def get_all_controls() -> list[dict]:
+    return CONTROLS
+
+
+def get_controls_by_csf(function: str) -> list[dict]:
+    return [c for c in CONTROLS if c["csf_function"] == function.upper()]
+
+
+def get_applicable_controls(asset: dict) -> list[dict]:
+    level = asset.get("purdue_level", "")
+    applicable = []
+    for control in CONTROLS:
+        if level not in control["applicable_levels"]:
+            continue
+        if control["control_id"] == "SI-3":
+            os_val = asset.get("os", "None").lower()
+            if os_val in ("none", "firmware only", "n/a", ""):
+                continue
+        if control["control_id"] == "RA-5":
+            os_val = asset.get("os", "None").lower()
+            if os_val in ("none", ""):
+                continue
+        applicable.append(control)
+    return applicable
+
+
+def evaluate_control(asset: dict, control: dict) -> dict:
+    field = control["check_field"]
+    expected = control["expected"]
+    actual = asset.get(field)
+
+    passed = False
+
+    if expected is True:
+        passed = actual is True
+    elif expected == "within_365":
+        if actual is None:
+            passed = False
+        else:
+            passed = actual <= 365
+    elif expected == "within_180":
+        if actual is None:
+            passed = False
+        else:
+            passed = actual <= 180
+
+    risk_score = 0 if passed else control["severity_weight"] * asset.get("criticality_weight", 2)
+
+    return {
+        "asset_id": asset["asset_id"],
+        "asset_name": asset["asset_name"],
+        "control_id": control["control_id"],
+        "control_title": control["title"],
+        "csf_function": control["csf_function"],
+        "severity": control["severity"],
+        "passed": passed,
+        "actual_value": actual,
+        "expected_value": expected,
+        "risk_score": risk_score,
+        "remediation": control["remediation"],
+    }
+PYEOF
+
+# ---- compliance_auditor.py ----
+cat > compliance_auditor.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+NIST 800-82 Rev. 3 Compliance Auditor
+Evaluates OT assets against applicable controls, calculates risk-weighted
+compliance scores, and generates aggregate metrics by CSF function.
+"""
+
+from ot_asset_parser import load_inventory, get_inventory_stats, summarize_by_purdue_level
+from nist_controls import get_applicable_controls, evaluate_control, get_all_controls
+
+
+def audit_asset(asset: dict) -> dict:
+    controls = get_applicable_controls(asset)
+    findings = [evaluate_control(asset, ctrl) for ctrl in controls]
+
+    total = len(findings)
+    passed = sum(1 for f in findings if f["passed"])
+    failed = [f for f in findings if not f["passed"]]
+    risk_score = sum(f["risk_score"] for f in findings)
+    compliance_pct = (passed / total * 100) if total > 0 else 100.0
+
+    return {
+        "asset": asset,
+        "total_controls": total,
+        "passed": passed,
+        "failed_count": len(failed),
+        "compliance_pct": round(compliance_pct, 1),
+        "risk_score": risk_score,
+        "findings": findings,
+        "failed_findings": failed,
+    }
+
+
+def run_full_audit(filepath: str) -> dict:
+    assets = load_inventory(filepath)
+    inventory_stats = get_inventory_stats(assets)
+    purdue_summary = summarize_by_purdue_level(assets)
+
+    asset_results = [audit_asset(asset) for asset in assets]
+
+    total_findings = sum(r["total_controls"] for r in asset_results)
+    total_passed = sum(r["passed"] for r in asset_results)
+    total_failed = sum(r["failed_count"] for r in asset_results)
+    total_risk = sum(r["risk_score"] for r in asset_results)
+    fully_compliant = sum(1 for r in asset_results if r["failed_count"] == 0)
+
+    overall_compliance = (total_passed / total_findings * 100) if total_findings > 0 else 100.0
+
+    csf_compliance = _calc_csf_compliance(asset_results)
+
+    critical_findings = []
+    high_findings = []
+    for result in asset_results:
+        for finding in result["failed_findings"]:
+            if finding["severity"] == "Critical":
+                critical_findings.append(finding)
+            else:
+                high_findings.append(finding)
+
+    all_failed = []
+    for result in asset_results:
+        all_failed.extend(result["failed_findings"])
+    all_failed.sort(key=lambda f: f["risk_score"], reverse=True)
+
+    return {
+        "metadata": {
+            "framework": "NIST SP 800-82 Rev. 3",
+            "csf_version": "NIST CSF 2.0",
+            "total_controls_evaluated": len(get_all_controls()),
+            "scope": "OT/ICS Security Compliance Assessment",
+        },
+        "inventory_stats": inventory_stats,
+        "purdue_summary": purdue_summary,
+        "overall_compliance": round(overall_compliance, 1),
+        "total_findings": total_failed,
+        "critical_findings_count": len(critical_findings),
+        "high_findings_count": len(high_findings),
+        "total_risk_score": total_risk,
+        "fully_compliant_assets": fully_compliant,
+        "total_assets": len(assets),
+        "csf_compliance": csf_compliance,
+        "asset_results": asset_results,
+        "critical_findings": critical_findings,
+        "high_findings": high_findings,
+        "top_risks": all_failed[:10],
+    }
+
+
+def _calc_csf_compliance(asset_results: list[dict]) -> dict:
+    csf_totals = {}
+    csf_passed = {}
+
+    for result in asset_results:
+        for finding in result["findings"]:
+            func = finding["csf_function"]
+            csf_totals[func] = csf_totals.get(func, 0) + 1
+            if finding["passed"]:
+                csf_passed[func] = csf_passed.get(func, 0) + 1
+
+    csf_compliance = {}
+    for func in ["IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]:
+        total = csf_totals.get(func, 0)
+        passed = csf_passed.get(func, 0)
+        pct = (passed / total * 100) if total > 0 else 100.0
+        csf_compliance[func] = {
+            "total": total,
+            "passed": passed,
+            "failed": total - passed,
+            "compliance_pct": round(pct, 1),
+        }
+
+    return csf_compliance
+
+
+def get_remediation_roadmap(audit_report: dict) -> list[dict]:
+    seen = set()
+    roadmap = []
+
+    for finding in audit_report["top_risks"]:
+        key = (finding["control_id"], finding["remediation"])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        affected_assets = [
+            f["asset_id"]
+            for result in audit_report["asset_results"]
+            for f in result["failed_findings"]
+            if f["control_id"] == finding["control_id"]
+        ]
+
+        roadmap.append({
+            "priority": len(roadmap) + 1,
+            "control_id": finding["control_id"],
+            "control_title": finding["control_title"],
+            "severity": finding["severity"],
+            "csf_function": finding["csf_function"],
+            "affected_assets": affected_assets,
+            "affected_count": len(affected_assets),
+            "remediation": finding["remediation"],
+        })
+
+    return roadmap
+PYEOF
+
+# ---- report_generator.py ----
+cat > report_generator.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+HTML Report Generator
+Produces professional, self-contained HTML compliance reports with
+executive scorecards, CSF compliance bars, risk heatmaps, per-asset
+findings cards, and a prioritized remediation roadmap.
+"""
+
+import json
+from datetime import datetime
+from compliance_auditor import get_remediation_roadmap
+
+
+def generate_html_report(audit_report: dict, output_path: str = "otsat_report.html") -> str:
+    roadmap = get_remediation_roadmap(audit_report)
+    html = _build_html(audit_report, roadmap)
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    return output_path
+
+
+def generate_json_report(audit_report: dict, output_path: str = "otsat_report.json") -> str:
+    def _serialize(obj):
+        if isinstance(obj, (datetime,)):
+            return obj.isoformat()
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(audit_report, fh, indent=2, default=_serialize)
+    return output_path
+
+
+def _severity_color(severity: str) -> str:
+    return {"Critical": "#e74c3c", "High": "#f39c12", "Medium": "#3498db", "Low": "#2ecc71"}.get(severity, "#95a5a6")
+
+
+def _compliance_color(pct: float) -> str:
+    if pct >= 90: return "#2ecc71"
+    elif pct >= 70: return "#f39c12"
+    else: return "#e74c3c"
+
+
+def _bar_html(label, pct):
+    color = _compliance_color(pct)
+    return f'<div class="csf-row"><span class="csf-label">{label}</span><div class="csf-bar-bg"><div class="csf-bar-fill" style="width:{pct}%;background:{color};"></div></div><span class="csf-pct">{pct:.1f}%</span></div>'
+
+
+def _score_card(value, label, card_class=""):
+    return f'<div class="score-card {card_class}"><div class="label">{label}</div><div class="value">{value}</div></div>'
+
+
+def _finding_row(f):
+    color = _severity_color(f["severity"])
+    status = "PASS" if f["passed"] else "FAIL"
+    sc = "pass" if f["passed"] else "fail"
+    return f'<tr><td><span class="badge" style="background:{color}">{f["severity"]}</span></td><td><strong>{f["control_id"]}</strong></td><td>{f["control_title"]}</td><td>{f["csf_function"]}</td><td><span class="status-{sc}">{status}</span></td></tr>'
+
+
+def _asset_card(result):
+    a = result["asset"]
+    cc = _compliance_color(result["compliance_pct"])
+    rows = "".join(_finding_row(f) for f in result["findings"])
+    rem = ""
+    if result["failed_findings"]:
+        items = "".join(f'<li><strong>{f["control_id"]}:</strong> {f["remediation"]}</li>' for f in result["failed_findings"])
+        rem = f'<div class="remediation-box"><h4>Recommended Remediations</h4><ul>{items}</ul></div>'
+    return f'''<div class="asset-card"><div class="asset-header"><div><h3>{a["asset_name"]} ({a["asset_id"]})</h3><span class="asset-meta">{a["asset_type"]} | {a["purdue_level"]} | {a["zone"]} | {a["vendor"]}</span></div><div class="asset-score" style="border-color:{cc}"><div class="asset-score-value" style="color:{cc}">{result["compliance_pct"]}%</div><div class="asset-score-label">Compliance</div></div></div><div class="asset-details"><table class="details-grid"><tr><td><strong>IP:</strong> {a["ip_address"]}</td><td><strong>Protocol:</strong> {a["protocol"]}</td><td><strong>OS:</strong> {a["os"]}</td></tr><tr><td><strong>Firmware:</strong> {a["firmware_version"]}</td><td><strong>Criticality:</strong> {a["criticality"]}</td><td><strong>Last Patched:</strong> {a["last_patched"]}</td></tr></table></div><table class="findings-table"><thead><tr><th>Severity</th><th>Control</th><th>Title</th><th>CSF</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>{rem}</div>'''
+
+
+def _roadmap_row(item):
+    color = _severity_color(item["severity"])
+    assets_str = ", ".join(item["affected_assets"][:5])
+    if len(item["affected_assets"]) > 5:
+        assets_str += f' (+{len(item["affected_assets"]) - 5} more)'
+    return f'<tr><td><strong>#{item["priority"]}</strong></td><td><span class="badge" style="background:{color}">{item["severity"]}</span></td><td><strong>{item["control_id"]}</strong> - {item["control_title"]}</td><td>{item["affected_count"]}</td><td><small>{assets_str}</small></td><td>{item["remediation"]}</td></tr>'
+
+
+def _build_html(report, roadmap):
+    now = datetime.now().strftime("%B %d, %Y at %H:%M")
+    score_cards = "".join([
+        _score_card(f'{report["overall_compliance"]}%', "Overall Compliance", "success" if report["overall_compliance"] >= 80 else "warning" if report["overall_compliance"] >= 60 else "critical"),
+        _score_card(report["total_findings"], "Total Findings", "critical" if report["total_findings"] > 10 else "warning"),
+        _score_card(report["critical_findings_count"], "Critical Findings", "critical"),
+        _score_card(f'{report["fully_compliant_assets"]}/{report["total_assets"]}', "Fully Compliant Assets", "success" if report["fully_compliant_assets"] == report["total_assets"] else "warning"),
+        _score_card(report["total_risk_score"], "Aggregate Risk Score", "critical" if report["total_risk_score"] > 500 else "warning"),
+    ])
+    csf = report["csf_compliance"]
+    csf_bars = "".join(_bar_html(f, csf[f]["compliance_pct"]) for f in ["IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"])
+    asset_cards = "".join(_asset_card(r) for r in report["asset_results"])
+    roadmap_rows = "".join(_roadmap_row(item) for item in roadmap)
+
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OTSAT - NIST 800-82 Rev. 3 OT Security Compliance Report</title>
+<style>
+:root {{--primary:#1a1a2e;--secondary:#16213e;--accent:#0f3460;--highlight:#e94560;--success:#2ecc71;--warning:#f39c12;--danger:#e74c3c;--bg:#f5f6fa;--card:#ffffff;--text:#2c3e50;--muted:#7f8c8d;}}
+*{{margin:0;padding:0;box-sizing:border-box;}}
+body{{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;}}
+.header{{background:linear-gradient(135deg,var(--primary),var(--accent));color:white;padding:40px;text-align:center;}}
+.header h1{{font-size:2em;margin-bottom:10px;}}
+.header .meta{{opacity:0.85;font-size:0.95em;}}
+.container{{max-width:1200px;margin:0 auto;padding:30px;}}
+h2{{color:var(--primary);margin:30px 0 15px;border-bottom:2px solid var(--accent);padding-bottom:8px;}}
+.score-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;margin:30px 0;}}
+.score-card{{background:var(--card);border-radius:12px;padding:25px;text-align:center;box-shadow:0 2px 15px rgba(0,0,0,0.08);border-top:4px solid var(--accent);}}
+.score-card.critical{{border-top-color:var(--danger);}}
+.score-card.warning{{border-top-color:var(--warning);}}
+.score-card.success{{border-top-color:var(--success);}}
+.score-card .value{{font-size:2.2em;font-weight:700;margin:10px 0;}}
+.score-card .label{{color:var(--muted);font-size:0.85em;text-transform:uppercase;letter-spacing:1px;}}
+.csf-bar-container{{background:var(--card);border-radius:12px;padding:25px;box-shadow:0 2px 15px rgba(0,0,0,0.08);}}
+.csf-row{{display:flex;align-items:center;margin:12px 0;}}
+.csf-label{{width:110px;font-weight:600;font-size:0.9em;}}
+.csf-bar-bg{{flex:1;height:28px;background:#ecf0f1;border-radius:14px;overflow:hidden;}}
+.csf-bar-fill{{height:100%;border-radius:14px;transition:width 0.5s ease;}}
+.csf-pct{{width:65px;text-align:right;font-weight:600;font-size:0.9em;}}
+.asset-card{{background:var(--card);border-radius:12px;padding:25px;margin:20px 0;box-shadow:0 2px 15px rgba(0,0,0,0.08);}}
+.asset-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;}}
+.asset-header h3{{color:var(--primary);}}
+.asset-meta{{color:var(--muted);font-size:0.85em;}}
+.asset-score{{width:90px;height:90px;border-radius:50%;border:4px solid;display:flex;flex-direction:column;align-items:center;justify-content:center;}}
+.asset-score-value{{font-size:1.3em;font-weight:700;}}
+.asset-score-label{{font-size:0.65em;text-transform:uppercase;color:var(--muted);}}
+.details-grid{{width:100%;margin-bottom:15px;}}
+.details-grid td{{padding:4px 12px;font-size:0.9em;}}
+.findings-table{{width:100%;border-collapse:collapse;font-size:0.85em;}}
+.findings-table th{{background:var(--primary);color:white;padding:8px 12px;text-align:left;}}
+.findings-table td{{padding:8px 12px;border-bottom:1px solid #ecf0f1;}}
+.badge{{color:white;padding:2px 10px;border-radius:12px;font-size:0.8em;font-weight:600;}}
+.status-pass{{color:var(--success);font-weight:700;}}
+.status-fail{{color:var(--danger);font-weight:700;}}
+.remediation-box{{background:#fff3cd;border-left:4px solid var(--warning);padding:15px;margin-top:15px;border-radius:8px;}}
+.remediation-box h4{{color:var(--warning);margin-bottom:8px;}}
+.remediation-box ul{{margin-left:20px;}}
+.remediation-box li{{margin:5px 0;font-size:0.9em;}}
+.roadmap-table{{width:100%;border-collapse:collapse;font-size:0.85em;}}
+.roadmap-table th{{background:var(--primary);color:white;padding:10px 12px;text-align:left;}}
+.roadmap-table td{{padding:10px 12px;border-bottom:1px solid #ecf0f1;vertical-align:top;}}
+.footer{{text-align:center;padding:30px;color:var(--muted);font-size:0.85em;margin-top:40px;border-top:1px solid #ddd;}}
+</style>
+</head>
+<body>
+<div class="header"><h1>NIST 800-82 Rev. 3 OT Security Compliance Assessment</h1><div class="meta">Generated by OTSAT (OT Security Assessment Toolkit) | {now}<br>Framework: NIST SP 800-82 Rev. 3 | CSF 2.0 Mapping | {report["total_assets"]} Assets Evaluated</div></div>
+<div class="container">
+<h2>Executive Summary</h2><div class="score-grid">{score_cards}</div>
+<h2>NIST CSF Function Compliance</h2><div class="csf-bar-container">{csf_bars}</div>
+<h2>Per-Asset Compliance Details</h2>{asset_cards}
+<h2>Prioritized Remediation Roadmap</h2><table class="roadmap-table"><thead><tr><th>#</th><th>Severity</th><th>Control</th><th>Assets</th><th>Affected</th><th>Remediation</th></tr></thead><tbody>{roadmap_rows}</tbody></table>
+</div>
+<div class="footer">OTSAT - OT Security Assessment Toolkit | Automated NIST 800-82 Rev. 3 Compliance Auditor<br>Report generated {now} | Zero external dependencies | github.com/Sh8rlock/OTSAT</div>
+</body></html>'''
+PYEOF
+
+# ---- sample_data/ot_asset_inventory.csv ----
+cat > sample_data/ot_asset_inventory.csv << 'CSVEOF'
+asset_id,asset_name,asset_type,purdue_level,zone,ip_address,protocol,os,firmware_version,vendor,criticality,last_patched,network_segmented,auth_enabled,encrypted_comms,backup_exists,has_antivirus,physical_access_controlled,change_mgmt_documented,incident_response_plan
+OT-001,Main DCS Controller,DCS,Level_2,Process_Control,10.10.2.10,Modbus/TCP,Windows Server 2016,4.2.1,Honeywell,Critical,2025-08-15,Yes,Yes,No,Yes,Yes,Yes,Yes,Yes
+OT-002,Reactor PLC Unit A,PLC,Level_1,Safety,10.10.1.20,EtherNet/IP,Firmware Only,3.1.0,Allen-Bradley,Critical,2024-03-10,Yes,No,No,Yes,No,Yes,Yes,Yes
+OT-003,Tank Level Transmitter,Sensor,Level_0,Field,10.10.0.30,HART,None,2.0.5,Emerson,High,Never,No,No,No,No,No,Yes,No,No
+OT-004,SCADA Server Primary,SCADA,Level_2,Process_Control,10.10.2.40,OPC-UA,Windows Server 2019,6.1.2,Siemens,Critical,2026-01-20,Yes,Yes,Yes,Yes,Yes,Yes,Yes,Yes
+OT-005,HMI Workstation 1,HMI,Level_2,Process_Control,10.10.2.50,OPC-DA,Windows 10 LTSC,N/A,GE Digital,High,2025-11-05,Yes,Yes,No,Yes,Yes,Yes,Yes,Yes
+OT-006,Historian Server,Historian,Level_3,Operations,10.10.3.60,SQL/ODBC,Windows Server 2022,8.0.1,OSIsoft,High,2026-02-28,Yes,Yes,Yes,Yes,Yes,Yes,Yes,Yes
+OT-007,Remote RTU Site B,RTU,Level_1,Field,10.10.1.70,DNP3,Firmware Only,1.4.3,Schweitzer,Critical,2023-06-22,No,No,No,Yes,No,No,No,Yes
+OT-008,Fire & Gas System,SIS,Level_1,Safety,10.10.1.80,ProfiSafe,Firmware Only,5.0.0,Yokogawa,Critical,2025-05-18,Yes,Yes,No,Yes,No,Yes,Yes,Yes
+OT-009,Ethernet Switch ICS,Network,Level_2,Process_Control,10.10.2.90,Managed,Firmware Only,3.3.7,Cisco IE,High,2025-09-30,Yes,Yes,Yes,Yes,No,Yes,Yes,Yes
+OT-010,Engineering Workstation,Workstation,Level_3,Operations,10.10.3.100,RDP/SSH,Windows 11,N/A,Dell,High,2026-03-15,Yes,Yes,Yes,Yes,Yes,Yes,Yes,Yes
+OT-011,Boiler PLC Unit C,PLC,Level_1,Safety,10.10.1.110,Modbus/RTU,Firmware Only,2.8.1,Schneider,Critical,2024-11-01,Yes,No,No,Yes,No,Yes,No,No
+OT-012,Wireless Access Point OT,Network,Level_2,Process_Control,10.10.2.120,WPA2-Enterprise,Firmware Only,4.1.0,Aruba,Medium,2025-07-20,Yes,Yes,Yes,No,No,Yes,Yes,Yes
+OT-013,Badge Reader Entry,Physical,Level_3,Operations,10.10.3.130,Wiegand,Firmware Only,1.2.0,HID Global,Medium,Never,No,No,No,No,No,Yes,No,No
+OT-014,Camera System NVR,Physical,Level_3,Operations,10.10.3.140,ONVIF,Linux,2.5.4,Axis,Medium,2025-04-10,Yes,Yes,No,Yes,No,Yes,Yes,Yes
+OT-015,Portable Maintenance Laptop,Workstation,Level_3,Operations,10.10.3.150,USB/Serial,Windows 10,N/A,Lenovo,High,2026-01-05,No,Yes,No,No,Yes,No,No,Yes
+CSVEOF
+
+# ---- .gitignore ----
+cat > .gitignore << 'GIEOF'
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.html
+*.json
+!sample_data/*.json
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+GIEOF
+
+# ---- LICENSE ----
+cat > LICENSE << 'LICEOF'
+MIT License
+
+Copyright (c) 2026 Larry Odeyemi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+LICEOF
+
+echo ""
+echo "====================================="
+echo "  OTSAT setup complete!"
+echo "  Files created:"
+ls -la *.py sample_data/ .gitignore LICENSE
+echo "====================================="
+echo ""
+echo "Next: git add -A && git commit -m 'Initial commit: OTSAT v1.0' && git push"
